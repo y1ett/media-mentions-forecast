@@ -1,0 +1,140 @@
+# Конфигурация системы прогноза медиа-активности.
+# Параметры из ENV_OVERRIDES (src/config.py) можно переопределить переменной окружения или в .env
+
+project:
+  timezone: UTC
+  seed: 42
+  # User-Agent обязателен для Wikimedia; контакт задаётся через CONTACT_EMAIL в .env
+  user_agent: "media-mentions-forecast/0.1 (student project; {contact})"
+  contact: "unknown@example.com"
+
+paths:
+  data_dir: data
+  db: data/media.duckdb
+
+http:
+  timeout: 30
+  retries: 4
+  backoff: 2
+
+# Темы: каждая тема = отдельный объект прогноза.
+# hn_queries    — запросы к Hacker News (источник A, объединяются по objectID)
+# wiki_articles — статьи английской Википедии (источник B, просмотры по дням)
+# gdelt_query   — запрос к GDELT (источник C, объём мировых новостей)
+# habr_hub      — хаб Habr (источник D, RSS)
+topics:
+  ai_llm:
+    title: Искусственный интеллект и LLM
+    hn_queries: ["LLM", "ChatGPT", "OpenAI"]
+    wiki_articles: [Large_language_model, ChatGPT, Artificial_intelligence]
+    gdelt_query: '"artificial intelligence"'
+    habr_hub: artificial_intelligence
+  cybersecurity:
+    title: Кибербезопасность
+    hn_queries: ["cybersecurity", "ransomware", "vulnerability"]
+    wiki_articles: [Computer_security, Ransomware, Data_breach]
+    gdelt_query: 'cybersecurity'
+    habr_hub: infosecurity
+  crypto:
+    title: Криптовалюты
+    hn_queries: ["bitcoin", "ethereum", "cryptocurrency"]
+    wiki_articles: [Bitcoin, Ethereum, Cryptocurrency]
+    gdelt_query: 'bitcoin'
+    habr_hub: cryptocurrency
+  electric_vehicles:
+    title: Электромобили
+    hn_queries: ["electric vehicle", "Tesla", "EV charging"]
+    wiki_articles: [Electric_vehicle, "Tesla,_Inc.", Battery_electric_vehicle]
+    gdelt_query: '"electric vehicle"'
+    habr_hub: transport
+  space:
+    title: Космос
+    hn_queries: ["SpaceX", "NASA", "rocket launch"]
+    wiki_articles: [SpaceX, NASA, Space_exploration]
+    gdelt_query: 'spacex'
+    habr_hub: space
+
+sources:
+  start_date: "2025-01-01"   # с какой даты грузить историю (HISTORY_START в .env)
+  hn:
+    url: https://hn.algolia.com/api/v1/search_by_date
+    tags: "(story,comment)"
+    hits_per_page: 20       # сколько текстов на (запрос, день) сохраняем для текстовых признаков
+    max_text_chars: 1000    # длинные комментарии обрезаются
+    requests_per_sec: 2.7   # лимит Algolia ~10 000 запросов в час с одного IP
+    workers: 8
+    refetch_days: 2         # последние дни перезапрашиваются: индекс HN догоняет с задержкой
+    sample_days: 1          # для пробной загрузки (make probe)
+  wiki:
+    url: https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article
+    project: en.wikipedia
+    access: all-access
+    agent: user
+    sample_days: 14
+  gdelt:
+    url: https://api.gdeltproject.org/api/v2/doc/doc
+    timespan: 7d            # для пробной загрузки
+    history_timespan: 3m    # первая загрузка: GDELT хранит около 3 месяцев
+    min_interval_sec: 5.5   # ограничение GDELT: не чаще 1 запроса в 5 секунд
+  habr:
+    url: "https://habr.com/ru/rss/hubs/{hub}/articles/?fl=ru"
+  calendar:
+    years: [2022, 2023, 2024, 2025, 2026, 2027]
+    countries: [RU, US]
+
+processing:
+  wiki_spike_factor: 10     # просмотры > 10 медиан за 28 дней считаются аномалией (боты) и заменяются медианой
+  max_ffill_days: 3         # короткие пропуски рядов заполняются предыдущим значением
+  hashing_features: 4096    # размерность HashingVectorizer (без обучения -> без утечки)
+  # слова-маркеры событий: доля текстов дня, где они встречаются
+  event_words: [release, launch, launches, launched, announce, announces, announced, breach,
+                hack, hacked, outage, lawsuit, ban, banned, crash, record, funding, acquisition,
+                acquire, layoffs, leak, leaked, vulnerability, exploit]
+
+quality:
+  max_missing_target_share: 0.02   # критично: доля дней без целевой переменной
+  max_missing_wiki_share: 0.05
+  spike_robust_z: 6                # предупреждение: резкие всплески (не ошибка, а событие)
+
+model:
+  seed: 42
+  horizons: [1, 2, 3, 4, 5, 6, 7]  # прогноз на 1..7 дней вперёд (одна модель, горизонт — признак)
+  holdout_days: 60                 # отложенная выборка: последние 60 дней, не участвуют в подборе
+  cv_folds: 5                      # окна валидации с расширяющимся обучающим множеством
+  cv_fold_days: 30
+  min_history_days: 28             # первые дни без полной истории окон отбрасываются
+  ridge:
+    alpha: 3.0
+  random_forest:
+    n_estimators: 150
+    min_samples_leaf: 10
+    max_features: 0.4
+    max_samples: 0.5        # бутстрэп на половине строк: быстрее и меньше переобучения
+    n_jobs: -1
+  lightgbm:
+    objective: regression
+    n_estimators: 500
+    learning_rate: 0.03
+    num_leaves: 31
+    min_child_samples: 30
+    subsample: 0.8
+    subsample_freq: 1
+    colsample_bytree: 0.8
+    reg_lambda: 1.0
+    verbose: -1
+  tuning:
+    n_trials: 30
+    timeout_sec: 900
+
+monitoring:
+  psi_top_features: 10       # сколько самых важных признаков проверять на дрейф
+  psi_threshold: 0.25        # PSI > 0.25 — существенный сдвиг распределения
+  psi_min_features: 3        # дрейф, если сдвинулись хотя бы 3 ключевых признака
+  current_window_days: 28
+  min_new_days: 14           # дрейф считается, когда после обучения накопилось >= 14 дней
+  retrain_wape_factor: 1.2   # переобучение, если ошибка на новых данных выросла на 20%
+  min_rows: 50
+  max_model_age_days: 30
+
+paths_models: models        # реестр версий моделей
+
