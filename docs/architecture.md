@@ -1,5 +1,9 @@
 # Архитектура системы
 
+![Схема архитектуры](architecture.png)
+
+Та же схема в текстовом виде (Mermaid):
+
 ```mermaid
 flowchart LR
     subgraph SRC[Источники]
